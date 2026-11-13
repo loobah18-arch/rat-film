@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sisyphus the Rat — a 2D animated film</title>
+<style>
+  :root {
+    --bg: #0e1418;
+    --stage: #131c22;
+    --cream: #f2ead8;
+    --amber: #f6b352;
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: var(--bg);
+    color: var(--cream);
+    font-family: ui-rounded, "Avenir Next", "Nunito", system-ui, sans-serif;
+    overflow: hidden;
+  }
+  #wrap {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #frame {
+    position: relative;
+    width: min(100vw, calc(100vh * 16 / 9));
+    aspect-ratio: 16 / 9;
+    background: var(--stage);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,.55);
+  }
+  svg#film { display: block; width: 100%; height: 100%; }
+  #caption {
+    position: absolute;
+    left: 50%; bottom: 9%;
+    transform: translateX(-50%);
+    max-width: 82%;
+    text-align: center;
+    font-size: clamp(14px, 2.6vw, 26px);
+    line-height: 1.45;
+    color: var(--cream);
+    text-shadow: 0 2px 12px rgba(0,0,0,.7);
+    opacity: 0;
+    pointer-events: none;
+    transition: none; /* opacity is driven per-frame by the timeline */
+  }
+  #endcard {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px;
+    background: rgba(10, 15, 19, 0.88);
+    opacity: 0; pointer-events: none;
+  }
+  #endcard h1 { margin: 0; font-size: clamp(20px, 4.2vw, 44px); letter-spacing: .14em; }
+  #endcard p { margin: 0; opacity: .7; letter-spacing: .08em; }
+  /* render mode (?render=1): chrome-free full-bleed stage for frame capture */
+  body.render { background: #000; }
+  body.render #frame { width: 100vw; height: 100vh; max-width: none; border-radius: 0; box-shadow: none; }
+  body.render #chrome { display: none; }
+  body.render #caption { bottom: 10%; max-width: 74%; font-size: clamp(24px, 3.4vh, 40px); font-weight: 600; }
+  #replay {
+    margin-top: 10px;
+    font: inherit; font-size: clamp(13px, 1.8vw, 17px);
+    color: #10161b; background: var(--amber);
+    border: none; border-radius: 999px;
+    padding: 10px 22px; cursor: pointer;
+    transition: transform 150ms var(--ease-out), opacity 150ms var(--ease-out);
+  }
+  #replay:hover { transform: scale(1.05); }
+  #replay:active { transform: scale(0.97); }
+  #chrome {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px;
+    background: linear-gradient(transparent, rgba(0,0,0,.45));
+    opacity: 0;
+    transition: opacity 200ms var(--ease-out);
+  }
+  #frame:hover #chrome, #frame.paused #chrome { opacity: 1; }
+  #play {
+    font: inherit; font-size: 15px;
+    width: 40px; height: 40px; flex: none;
+    border: none; border-radius: 999px;
+    background: rgba(242,234,216,.14); color: var(--cream);
+    cursor: pointer;
+    transition: background 150ms var(--ease-out), transform 120ms var(--ease-out);
+  }
+  #play:hover { background: rgba(242,234,216,.26); }
+  #play:active { transform: scale(0.94); }
+  #bar {
+    flex: 1; height: 22px;
+    display: flex; align-items: center;
+    cursor: pointer;
+  }
+  #bar-track {
+    width: 100%; height: 4px; border-radius: 2px;
+    background: rgba(242,234,216,.18);
+    overflow: hidden;
+  }
+  #bar-fill { height: 100%; width: 0%; background: var(--amber); border-radius: 2px; }
+  #mute {
+    font: inherit; font-size: 14px;
+    border: none; background: none; color: var(--cream);
+    cursor: pointer; opacity: .8;
+    transition: opacity 150ms var(--ease-out);
+  }
+  #mute:hover { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) {
+    #replay, #play { transition: opacity 150ms var(--ease-out); }
+    #replay:hover { transform: none; }
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="frame" class="paused">
+    <svg id="film" viewBox="0 0 1280 720" preserveAspectRatio="xMidYMid slice"></svg>
+    <div id="caption"></div>
+    <div id="endcard">
+      <h1>SISYPHUS THE RAT</h1>
+      <p>loop: ∞</p>
+      <button id="replay">Replay</button>
+    </div>
+    <div id="chrome">
+      <button id="play" aria-label="Play">▶</button>
+      <div id="bar"><div id="bar-track"><div id="bar-fill"></div></div></div>
+      <button id="mute" aria-label="Toggle sound">♪ off</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ============================================================
+   SISYPHUS THE RAT — deterministic 2D timeline animation.
+   Every frame is computed purely from master time `t`, so the
+   film is fully scrubbable and replayable without retained state.
+   ============================================================ */
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const W = 1280, H = 720;
+const DUR = 64; // seconds
+
+const REDUCED = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/* ---- math easings (easings.co standard curves) ---- */
+const clamp01 = (x) => x < 0 ? 0 : x > 1 ? 1 : x;
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOutQuart = (t) => 1 - Math.pow(1 - t, 4);                       // entrances
+const easeInOutQuint = (t) => t < .5 ? 16*t*t*t*t*t : 1 - Math.pow(-2*t + 2, 5) / 2; // on-screen moves
+const easeInQuad = (t) => t * t;                                          // gravity (character motion only)
+const fade = (t, a, b) => easeOutQuart(clamp01((t - a) / (b - a)));       // ease-out fade window
+
+function el(tag, attrs, parent) {
+  const n = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+
+const svg = document.getElementById("film");
+
+/* ---- palette ---- */
+const C = {
+  wall: "#1c2a33", wallHi: "#22333e", floor: "#242f2e", floorLo: "#1d2726",
+  gray: "#9aa4a8", grayHi: "#b3bcc0", grayLo: "#7d868a",
+  pink: "#e8a3a0", pinkLo: "#c98484",
+  amber: "#f6b352", amberLo: "#c98b3d", cream: "#f2ead8",
+  paper: "#e8dcc3", ink: "#3a3f42", teal: "#4a7d7a",
+  wood: "#5a4632", woodHi: "#6f5840", moon: "#f4df9a",
+  star: "#dfe8ee"
+};
+
+/* ============================================================
+   WORLD BUILD (static scenery + reusable rigs)
+   ============================================================ */
+const world = el("g", {}, svg);
+
+/* room background */
+el("rect", { x: 0, y: 0, width: W, height: H, fill: C.wall }, world);
+el("rect", { x: 0, y: 0, width: W, height: 470, fill: C.wallHi, opacity: .5 }, world);
+/* floor */
+el("rect", { x: 0, y: 470, width: W, height: 250, fill: C.floor }, world);
+el("rect", { x: 0, y: 470, width: W, height: 14, fill: C.floorLo }, world);
+/* warm pool of light from a desk lamp (soft ellipse) */
+el("ellipse", { cx: 330, cy: 500, rx: 430, ry: 130, fill: C.amber, opacity: .07 }, world);
+el("ellipse", { cx: 330, cy: 500, rx: 230, ry: 80, fill: C.amber, opacity: .08 }, world);
+
+/* desk legs (silhouette, upper left) */
+const desk = el("g", {}, world);
+el("rect", { x: 40, y: 0, width: 560, height: 22, rx: 8, fill: C.woodHi }, desk);
+el("rect", { x: 70, y: 22, width: 26, height: 470, rx: 6, fill: C.wood }, desk);
+el("rect", { x: 540, y: 22, width: 26, height: 470, rx: 6, fill: C.wood }, desk);
+
+/* the wall hole ("memory bank") */
+const hole = el("g", { transform: "translate(1150 330)" }, world);
+el("ellipse", { cx: 0, cy: 0, rx: 58, ry: 74, fill: "#0b1114" }, hole);
+el("ellipse", { cx: 0, cy: 0, rx: 58, ry: 74, fill: "none", stroke: "#2b3a44", "stroke-width": 6 }, hole);
+el("rect", { x: -34, y: -8, width: 68, height: 13, rx: 3, transform: "rotate(-7)", fill: C.paper, opacity: .85 }, hole);
+el("rect", { x: -30, y: 6, width: 60, height: 12, rx: 3, transform: "rotate(9)", fill: C.paper, opacity: .7 }, hole);
+const holeGlow = el("ellipse", { cx: 0, cy: 0, rx: 70, ry: 90, fill: C.amber, opacity: 0 }, hole);
+
+/* windowsill + cheese-wheel moon (scene 6) */
+const night = el("g", { opacity: 0 }, world);
+const nightRect = el("rect", { x: 0, y: 0, width: W, height: H, fill: "#0a141d" }, night);
+const moonG = el("g", { transform: "translate(960 170)" }, night);
+el("circle", { cx: 0, cy: 0, r: 85, fill: C.moon }, moonG);
+el("circle", { cx: -30, cy: -25, r: 16, fill: "#e3c977" }, moonG);
+el("circle", { cx: 28, cy: 10, r: 11, fill: "#e3c977" }, moonG);
+el("circle", { cx: 5, cy: 42, r: 7, fill: "#e3c977" }, moonG);
+el("circle", { cx: -18, cy: 30, r: 5, fill: "#e3c977" }, moonG);
+const sill = el("g", {}, night);
+el("rect", { x: 700, y: 470, width: 460, height: 26, rx: 8, fill: C.woodHi }, sill);
+el("rect", { x: 700, y: 496, width: 460, height: 200, fill: C.wall }, sill);
+/* stars */
+const stars = [];
+for (let i = 0; i < 26; i++) {
+  const x = 40 + Math.random() * 1200, y = 30 + Math.random() * 300;
+  stars.push({ n: el("circle", { cx: x, cy: y, r: 1.6 + Math.random() * 1.4, fill: C.star, opacity: .5 }, night), ph: Math.random() * 6.28 });
+}
+
+/* dust motes */
+const motes = [];
+for (let i = 0; i < 14; i++) {
+  motes.push({
+    n: el("circle", { cx: 0, cy: 0, r: 1.5 + Math.random() * 2, fill: C.cream, opacity: .18 }, world),
+    x: 100 + Math.random() * 1080, y: 120 + Math.random() * 340,
+    ph: Math.random() * 6.28, sp: .2 + Math.random() * .3
+  });
+}
+
+/* ============================================================
+   RAT RIG — built from primitives, posed per-frame.
+   ============================================================ */
+function makeRat(scale) {
+  const g = el("g", {}, world);
+  const bodyG = el("g", {}, g);
+
+  /* tail (behind body) */
+  const tailG = el("g", {}, bodyG);
+  el("path", {
+    d: "M 0 0 C 26 -6, 52 8, 84 -4 C 112 -14, 132 2, 150 -8",
+    fill: "none", stroke: C.pinkLo, "stroke-width": 7, "stroke-linecap": "round"
+  }, tailG);
+
+  /* hind + front legs */
+  const legB1 = el("rect", { x: -34, y: 30, width: 14, height: 22, rx: 7, fill: C.grayLo }, bodyG);
+  const legB2 = el("rect", { x: 6, y: 32, width: 14, height: 22, rx: 7, fill: C.grayLo }, bodyG);
+  const legF1 = el("rect", { x: 40, y: 32, width: 12, height: 20, rx: 6, fill: C.gray }, bodyG);
+  const legF2 = el("rect", { x: 66, y: 32, width: 12, height: 20, rx: 6, fill: C.gray }, bodyG);
+
+  /* body */
+  const body = el("ellipse", { cx: 20, cy: 10, rx: 62, ry: 40, fill: C.gray }, bodyG);
+  el("ellipse", { cx: 20, cy: 22, rx: 48, ry: 26, fill: C.grayHi, opacity: .35 }, bodyG);
+
+  /* head group (leans on neck pivot) */
+  const head = el("g", { transform: "translate(70 -6)" }, bodyG);
+  const earB = el("ellipse", { cx: 6, cy: -30, rx: 16, ry: 18, fill: C.pink, transform: "rotate(-18 6 -30)" }, head);
+  const earF = el("ellipse", { cx: 24, cy: -28, rx: 15, ry: 17, fill: C.pinkLo, transform: "rotate(10 24 -28)" }, head);
+  const skull = el("ellipse", { cx: 18, cy: 0, rx: 34, ry: 27, fill: C.gray }, head);
+  const snout = el("ellipse", { cx: 42, cy: 8, rx: 18, ry: 13, fill: C.grayHi }, head);
+  const nose = el("ellipse", { cx: 58, cy: 6, rx: 5, ry: 4, fill: C.pink }, head);
+  /* whiskers */
+  el("path", { d: "M 44 8 L 78 2 M 44 10 L 78 12", stroke: C.cream, "stroke-width": 1.4, opacity: .5, fill: "none" }, head);
+  /* eyes: pupil + blink lid */
+  const eyeW = el("circle", { cx: 30, cy: -4, r: 6.5, fill: "#141a1e" }, head);
+  el("circle", { cx: 32, cy: -6, r: 2, fill: "#e9f1f4", opacity: .9 }, head);
+  const lid = el("rect", { x: 21, y: -12, width: 18, height: 0, rx: 6, fill: C.gray }, head);
+  /* mouth (yawn) */
+  const mouth = el("ellipse", { cx: 50, cy: 16, rx: 4, ry: 1.5, fill: "#5b2f34" }, head);
+  /* droop ears by rotating them — kept simple: ear droop uses transform */
+
+  g.setAttribute("transform", `scale(${scale})`);
+  return { g, bodyG, tailG, head, legB1, legB2, legF1, legF2, lid, mouth, earB, earF, body, eyeW, scale };
+}
+
+/* pose the rig from deterministic params */
+function poseRat(r, p) {
+  const bob = Math.sin(p.bobT) * p.bob;
+  r.g.setAttribute("transform",
+    `translate(${p.x} ${p.y}) scale(${r.scale * p.s}) rotate(${p.lean})`);
+  r.bodyG.setAttribute("transform", `translate(0 ${bob})`);
+  r.tailG.setAttribute("transform", `rotate(${-18 + p.tailSway} 0 0)`);
+  r.head.setAttribute("transform", `translate(70 -6) rotate(${p.headTilt})`);
+  /* blink: lid height 0..14 */
+  const lidH = p.blink * 14;
+  r.lid.setAttribute("height", lidH);
+  r.lid.setAttribute("y", -12);
+  r.eyeW.setAttribute("opacity", p.blink > .8 ? .15 : 1);
+  /* mouth yawn */
+  r.mouth.setAttribute("ry", lerp(1.5, 9, p.yawn));
+  r.mouth.setAttribute("rx", lerp(4, 8, p.yawn));
+  /* gait: legs alternate; still when speed 0 */
+  const a = Math.sin(p.legPhase) * 6 * p.speed;
+  const b = Math.sin(p.legPhase + Math.PI) * 6 * p.speed;
+  r.legB1.setAttribute("transform", `translate(${a} 0)`);
+  r.legB2.setAttribute("transform", `translate(${b} 0)`);
+  r.legF1.setAttribute("transform", `translate(${b * .8} 0)`);
+  r.legF2.setAttribute("transform", `translate(${a * .8} 0)`);
+  /* ear droop (0 = perky, 1 = drooped) */
+  r.earB.setAttribute("transform", `rotate(${-18 - p.droop * 14} 6 -30)`);
+  r.earF.setAttribute("transform", `rotate(${10 + p.droop * 16} 24 -28)`);
+  r.earB.setAttribute("cy", -30 + p.droop * 8);
+  r.earF.setAttribute("cy", -28 + p.droop * 8);
+  /* stretch: body elongates */
+  r.body.setAttribute("rx", lerp(62, 74, p.stretch));
+  r.body.setAttribute("ry", lerp(40, 32, p.stretch));
+}
+
+/* deterministic blink: periodic with hashy offsets */
+function blink(t, period = 3.7, off = 0) {
+  const x = (t + off) % period;
+  return x < .22 ? Math.sin((x / .22) * Math.PI) : 0;
+}
+
+/* ============================================================
+   SCENE PROPS
+   ============================================================ */
+/* nest of shredded paper (scenes 1–2) */
+const nest = el("g", {}, world);
+el("ellipse", { cx: 150, cy: 545, rx: 120, ry: 30, fill: "#2b3336" }, nest);
+for (let i = 0; i < 9; i++) {
+  el("rect", {
+    x: 60 + i * 18, y: 528 + (i % 3) * 6, width: 30, height: 5, rx: 2,
+    transform: `rotate(${(i * 37) % 40 - 20} ${75 + i * 18} 530)`,
+    fill: C.paper, opacity: .8
+  }, nest);
+}
+
+/* labeled memory scraps (scene 3) */
+function scrap(label, x, y, rot) {
+  const g = el("g", { transform: `translate(${x} ${y}) rotate(${rot})` }, world);
+  el("rect", { x: -34, y: -12, width: 68, height: 24, rx: 4, fill: C.paper }, g);
+  const tx = el("text", {
+    x: 0, y: 4, "text-anchor": "middle",
+    "font-size": 13, "font-family": "ui-monospace, monospace", fill: C.ink
+  }, g);
+  tx.textContent = label;
+  return g;
+}
+const scrapA = scrap("context.md", 480, 560, -8);
+const scrapB = scrap("USER.md", 640, 575, 6);
+const scrapC = scrap("patterns.md", 800, 565, -4);
+
+/* giant acorn "GOAL" + staircase (scene 4) */
+const stairs = el("g", {}, world);
+const steps = [
+  [880, 640, 400, 60], [920, 585, 360, 60], [960, 530, 320, 60],
+  [1000, 475, 280, 60], [1040, 420, 240, 60]
+];
+for (const [x, y, w, h] of steps) {
+  el("rect", { x, y, width: w, height: h, fill: C.wood }, stairs);
+  el("rect", { x, y, width: w, height: 8, fill: C.woodHi }, stairs);
+}
+const acornG = el("g", {}, world);
+const acornCap = el("g", {}, acornG);
+el("ellipse", { cx: 0, cy: 0, rx: 46, ry: 40, fill: C.amber }, acornG);
+el("path", { d: "M -46 -14 A 46 34 0 0 1 46 -14 L 46 -22 A 46 34 0 0 0 -46 -22 Z", fill: C.amberLo }, acornG);
+el("rect", { x: -6, y: -42, width: 12, height: 16, rx: 5, fill: C.woodHi }, acornCap);
+const tag = el("g", {}, acornG);
+el("rect", { x: -30, y: 8, width: 60, height: 22, rx: 5, fill: C.cream }, tag);
+const tagT = el("text", { x: 0, y: 24, "text-anchor": "middle", "font-size": 14, "font-family": "ui-monospace, monospace", fill: C.ink }, tag);
+tagT.textContent = "GOAL";
+
+/* sigh bubble */
+const sigh = el("g", { opacity: 0 }, world);
+el("ellipse", { cx: 0, cy: 0, rx: 52, ry: 26, fill: C.cream, opacity: .92 }, sigh);
+const sighT = el("text", { x: 0, y: 6, "text-anchor": "middle", "font-size": 16, "font-family": "ui-monospace, monospace", fill: C.ink }, sigh);
+sighT.textContent = "resumed.";
+
+/* whistle note */
+const note = el("text", {
+  x: 0, y: 0, "font-size": 34, fill: C.cream, opacity: 0, "text-anchor": "middle"
+}, world);
+note.textContent = "♪";
+
+/* pups + tools (scene 5) */
+const pupTools = ["🔧", "🐛", "⑂", "☕"];
+const pups = [];
+for (let i = 0; i < 4; i++) {
+  pups.push({ r: makeRat(0.32), off: i * 0.55, speed: 1, tripper: i === 2 });
+}
+
+/* main rat */
+const rat = makeRat(1);
+
+/* title text (scene 1) */
+const title = el("g", { opacity: 0 }, world);
+const t1 = el("text", {
+  x: W / 2, y: 150, "text-anchor": "middle", "font-size": 46,
+  fill: C.cream, "letter-spacing": ".12em"
+}, title);
+t1.textContent = "A LIFE, NARRATED BY A RAT";
+const t2 = el("text", {
+  x: W / 2, y: 196, "text-anchor": "middle", "font-size": 20,
+  fill: C.cream, opacity: .65, "letter-spacing": ".08em"
+}, title);
+t2.textContent = "SISYPHUS · ORCHESTRATION LEAD · HOLE 12B";
+
+/* camera */
+const cam = el("g", {}, svg);
+world.parentNode.insertBefore(cam, world);
+cam.appendChild(world);
+cam.appendChild(note);
+cam.appendChild(sigh);
+world.appendChild(note); world.appendChild(sigh); // keep in scene space
+
+/* ============================================================
+   CAPTIONS
+   ============================================================ */
+const CAPS = [
+  [ 1.5,  7.5, "Some say I live under a desk. Accurate." ],
+  [ 9.0, 13.0, "Every day I wake up with a brand-new goal." ],
+  [13.6, 17.4, "It is enormous. It is shaped like a nut." ],
+  [19.0, 23.5, "Before anything: I hoard scraps of memory." ],
+  [24.0, 27.6, "context.md is RAM. Everything else is history." ],
+  [29.0, 33.5, "Today's goal: move the acorn up the stairs." ],
+  [34.2, 37.4, "Progress: excellent. Gravity: unimpressed." ],
+  [38.0, 39.4, "status: resumed." ],
+  [41.5, 45.5, "So I delegate. Rat pups, tiny tools, go." ],
+  [46.2, 51.0, "Delegation is powerful. It does not fix gravity." ],
+  [54.0, 58.5, "Tomorrow: the hill again. It keeps me honest." ],
+  [59.4, 63.2, "A rat's life is a loop. I run it anyway." ],
+];
+
+/* ============================================================
+   TIMELINE
+   ============================================================ */
+function updateScene1(t) { /* 0–8 title over sleeping nest */
+  const inT = fade(t, 1.0, 3.0), inT2 = fade(t, 2.6, 4.4);
+  title.setAttribute("opacity", inT);
+  t2.setAttribute("opacity", .65 * inT2);
+  cam.setAttribute("transform", `translate(0 0) scale(${1 + (REDUCED ? 0 : 0.03) * clamp01(t / 8)})`);
+  poseRat(rat, {
+    x: 130, y: 500, s: 1, lean: 8, bobT: t * 1.6, bob: 2.4,
+    tailSway: Math.sin(t * 1.2) * 6, headTilt: 14, blink: blink(t, 5, 1) * .6,
+    yawn: 0, legPhase: 0, speed: 0, droop: .5, stretch: 0
+  });
+}
+
+function updateScene2(t) { /* 8–18 wake & walk right */
+  title.setAttribute("opacity", Math.max(0, 1 - fade(t, 8, 9.2)));
+  const lt = t - 8;
+  /* stretch at 0–2s, yawn 2–3.4s, walk 3.6–10s */
+  const stretch = lt < 2 ? Math.sin((lt / 2) * Math.PI) : 0;
+  const yawn = (lt > 2 && lt < 3.4) ? Math.sin(((lt - 2) / 1.4) * Math.PI) : 0;
+  const walk = clamp01((lt - 3.6) / 6.4);
+  const x = lerp(150, 560, easeInOutQuint(walk));
+  cam.setAttribute("transform", `translate(${lerp(0, -60, walk)} 0) scale(${lerp(1.03, 1.08, walk)})`);
+  poseRat(rat, {
+    x, y: 520, s: 1, lean: stretch * -10, bobT: lt * 9, bob: 3,
+    tailSway: Math.sin(lt * 3) * 8, headTilt: stretch * -8 + yawn * 6,
+    blink: Math.max(blink(lt, 3.7, .4), yawn * .9),
+    yawn, legPhase: lt * 9, speed: walk > 0 ? 1 : 0, droop: 0, stretch
+  });
+}
+
+function updateScene3(t) { /* 18–28 hoard scraps into the hole */
+  const lt = t - 18;
+  const slots = [ [480, 560, -8], [640, 575, 6], [800, 565, -4] ];
+  const pieces = [scrapA, scrapB, scrapC];
+  for (let i = 0; i < 3; i++) {
+    const s = clamp01((lt - (0.8 + i * 2.4)) / 1.9);
+    const [sx, sy, sr] = slots[i];
+    const hx = 1090, hy = 480;
+    const e = easeInOutQuint(s);
+    pieces[i].setAttribute("transform",
+      `translate(${lerp(sx, hx, e)} ${lerp(sy, hy - Math.sin(s * Math.PI) * 60, e)}) rotate(${lerp(sr, 0, e)}) scale(${lerp(1, .5, e)})`);
+    pieces[i].setAttribute("opacity", s >= 1 ? 0 : 1);
+  }
+  holeGlow.setAttribute("opacity", .12 * (0.5 + 0.5 * Math.sin(t * 4)));
+  /* rat shuttles toward each scrap then to the hole */
+  const legs = [200, 560, 760, 1050];
+  const li = Math.min(3, Math.floor(lt / 2.4) + (lt < .8 ? 0 : 0));
+  const seg = clamp01((lt - (li === 0 ? 0 : 0.8 + (li - 1) * 2.4 + 1.9)) / 0.9);
+  const x = lerp(legs[li] ?? 1050, legs[Math.min(3, li + 1)] ?? 1050, easeInOutQuint(seg));
+  const walking = seg > 0 && seg < 1 ? 1 : 0;
+  cam.setAttribute("transform", `translate(${lerp(-60, -110, clamp01(lt / 10))} 0) scale(1.08)`);
+  poseRat(rat, {
+    x, y: 520, s: 1, lean: walking * -6, bobT: lt * 9, bob: 3,
+    tailSway: Math.sin(lt * 3) * 8, headTilt: 0,
+    blink: blink(lt, 3.3, 2), yawn: 0, legPhase: lt * 9, speed: walking, droop: 0, stretch: 0
+  });
+}
+
+function updateScene4(t) { /* 28–40 the boulder */
+  const lt = t - 28;
+  const climb = clamp01(lt / 7.2);                 // 0–7.2s: push up
+  const e = easeInOutQuint(climb);
+  /* rat walks from left floor to base of stairs then pushes along steps */
+  const bx = lerp(180, 1060, e);                  // rat nose position
+  const by = lerp(640, 380, e);
+  const ax = bx + 70, ay = by - 26;               // acorn pushed ahead
+  /* after top (lt > 7.2): acorn rolls back down */
+  const fall = clamp01((lt - 7.6) / 2.2);
+  const fx = lerp(1060, 180, easeInQuad(fall));
+  const fy = lerp(380, 640, easeInQuad(fall));
+  const ax2 = fx + 70, ay2 = fy - 26;
+  const rolling = lt > 7.6;
+  acornG.setAttribute("transform",
+    `translate(${rolling ? ax2 : ax} ${rolling ? ay2 : ay}) rotate(${rolling ? -(fx - 1060) * .6 : 0})`);
+  acornG.setAttribute("opacity", 1);
+  sigh.setAttribute("transform", `translate(${bx - 10} ${by - 150})`);
+  const sighT_ = fade(lt, 9.2, 9.8) * (1 - fade(lt, 11.4, 12));
+  sigh.setAttribute("opacity", sighT_);
+  holeGlow.setAttribute("opacity", 0);
+  const y = rolling ? 640 : by;
+  const x = rolling ? fx : bx;
+  cam.setAttribute("transform", `translate(${lerp(-110, -140, e)} ${lerp(0, -30, e)}) scale(${lerp(1.08, 1.12, e)})`);
+  poseRat(rat, {
+    x, y, s: 1, lean: rolling ? 4 : 10, bobT: lt * (rolling ? 1.5 : 8), bob: rolling ? 1.5 : 3.2,
+    tailSway: Math.sin(lt * (rolling ? 1.2 : 3.2)) * (rolling ? 4 : 9),
+    headTilt: rolling ? 8 : 0, blink: blink(lt, 3.1, 1.1),
+    yawn: 0, legPhase: lt * (rolling ? 2 : 8), speed: rolling ? 0 : 1,
+    droop: rolling ? fade(lt, 8.4, 10) : 0, stretch: 0
+  });
+}
+
+function updateScene5(t) { /* 40–52 delegation */
+  const lt = t - 40;
+  acornG.setAttribute("opacity", 0);
+  note.setAttribute("x", 640 + Math.sin(lt * 2.2) * 30);
+  note.setAttribute("y", 430 - lt * 26);
+  note.setAttribute("opacity", fade(lt, .3, .8) * (1 - fade(lt, 2.2, 2.8)));
+  cam.setAttribute("transform", `translate(-40 0) scale(1.05)`);
+  /* pups dash right; pup #2 trips at the screen edge */
+  for (const p of pups) {
+    const pt = lt - p.off;
+    if (pt < 0) { p.r.g.setAttribute("opacity", 0); continue; }
+    p.r.g.setAttribute("opacity", 1);
+    let x = lerp(480, 1420, clamp01(pt / 7.5));
+    let y = 540, rot = 0;
+    if (p.tripper && pt > 5.6) { /* trip: fall off */
+      const f = clamp01((pt - 5.6) / 1.4);
+      x += f * 60;
+      y += f * f * 320;
+      rot = f * 80;
+    }
+    poseRat(p.r, {
+      x, y, s: 1, lean: -6, bobT: pt * 11, bob: 2.4,
+      tailSway: Math.sin(pt * 4) * 10, headTilt: 0,
+      blink: blink(pt, 2.9, p.off), yawn: 0,
+      legPhase: pt * 11, speed: 1, droop: 0, stretch: 0
+    });
+    p.r.g.setAttribute("transform",
+      p.r.g.getAttribute("transform") + ` rotate(${rot})`);
+  }
+  /* main rat whistles at left, watching */
+  poseRat(rat, {
+    x: 240, y: 540, s: 1, lean: -4, bobT: lt * 2, bob: 2,
+    tailSway: Math.sin(lt * 2.4) * 7, headTilt: 6,
+    blink: blink(lt, 3.6, .7), yawn: 0, legPhase: 0, speed: 0,
+    droop: 0, stretch: 0
+  });
+}
+
+function updateScene6(t) { /* 52–64 night, cheese moon, end card */
+  const lt = t - 52;
+  const inN = fade(lt, 0, 2.4);
+  night.setAttribute("opacity", inN);
+  nightRect.setAttribute("opacity", inN * .85);
+  title.setAttribute("opacity", 0);
+  for (const s of stars) s.n.setAttribute("opacity", (.35 + .45 * Math.abs(Math.sin(t * .8 + s.ph))) * inN);
+  const endIn = fade(lt, 9.6, 10.8);
+  endcard.setAttribute("opacity", endIn);
+  endcard.style.pointerEvents = endIn > .5 ? "auto" : "none";
+  cam.setAttribute("transform", `translate(${lerp(-140, -80, inN)} ${lerp(-30, 0, inN)}) scale(${lerp(1.12, 1.04, inN)})`);
+  poseRat(rat, {
+    x: 900, y: 452, s: 1, lean: 0, bobT: lt * 1.4, bob: 2,
+    tailSway: Math.sin(lt * 1.1) * 5, headTilt: -6,
+    blink: blink(lt, 4.4, 3), yawn: 0, legPhase: 0, speed: 0, droop: 0, stretch: 0
+  });
+}
+
+/* ============================================================
+   CLOCK + CHROME
+   ============================================================ */
+const frame = document.getElementById("frame");
+const caption = document.getElementById("caption");
+const endcard = document.getElementById("endcard");
+const playBtn = document.getElementById("play");
+const barFill = document.getElementById("bar-fill");
+const bar = document.getElementById("bar");
+const muteBtn = document.getElementById("mute");
+
+let t = 0, playing = false, last = 0;
+
+function paint(t_) {
+  /* scenes */
+  if (t_ < 8) updateScene1(t_);
+  else if (t_ < 18) updateScene2(t_);
+  else if (t_ < 28) updateScene3(t_);
+  else if (t_ < 40) updateScene4(t_);
+  else if (t_ < 52) updateScene5(t_);
+  else updateScene6(t_);
+
+  /* motes + hide stale props when out of their scene */
+  for (const m of motes) {
+    m.n.setAttribute("cx", m.x + Math.sin(t_ * m.sp + m.ph) * 26);
+    m.n.setAttribute("cy", m.y + Math.sin(t_ * m.sp * .7 + m.ph * 2) * 18);
+  }
+  /* props visible only inside their owning scene */
+  stairs.setAttribute("opacity",
+    (t_ >= 28 && t_ < 40) ? 1 : (t_ >= 52 ? 0.3 * (1 - fade(t_, 52, 54)) : 0));
+  if (!(t_ >= 18 && t_ < 28)) holeGlow.setAttribute("opacity", 0);
+  if (!(t_ >= 18 && t_ < 28) && t_ < 52) night.setAttribute("opacity", 0);
+  if (t_ >= 52) { /* scene 6 owns night opacity */ }
+  if (t_ < 18 || t_ >= 52) { /* hide title when not scene 1 */ }
+  if (!(t_ >= 28 && t_ < 40)) acornG.setAttribute("opacity", 0);
+  if (!(t_ >= 28 && t_ < 40)) sigh.setAttribute("opacity", 0);
+  if (!(t_ >= 40 && t_ < 52)) {
+    note.setAttribute("opacity", 0);
+    for (const p of pups) p.r.g.setAttribute("opacity", 0);
+  }
+
+  /* captions */
+  let cap = null;
+  for (const [a, b, s] of CAPS) if (t_ >= a && t_ <= b) { cap = s; break; }
+  if (cap !== caption.dataset.s) {
+    caption.textContent = cap || "";
+    caption.dataset.s = cap || "";
+  }
+  let co = 0;
+  if (cap) for (const [a, b] of CAPS) if (a <= t_ && t_ <= b) co = Math.min(fade(t_, a, a + .5), 1 - fade(t_, b - .6, b));
+  caption.style.opacity = co;
+
+  barFill.style.width = (clamp01(t_ / DUR) * 100) + "%";
+}
+
+function loop(now) {
+  if (playing) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    t += dt;
+    if (t >= DUR) { t = DUR; setPlaying(false); }
+    last = now;
+    paint(t);
+  }
+  requestAnimationFrame(loop);
+}
+
+function setPlaying(v) {
+  playing = v;
+  frame.classList.toggle("paused", !v);
+  playBtn.textContent = v ? "❚❚" : "▶";
+  if (v) last = performance.now();
+}
+
+playBtn.addEventListener("click", () => {
+  if (t >= DUR) t = 0;
+  setPlaying(!playing);
+});
+bar.addEventListener("click", (e) => {
+  const r = bar.getBoundingClientRect();
+  t = clamp01((e.clientX - r.left) / r.width) * DUR;
+  paint(t);
+});
+document.getElementById("replay").addEventListener("click", () => {
+  t = 0; paint(0); setPlaying(true);
+});
+
+/* audio: tiny WebAudio blips per scene beat (muted by default) */
+let AC = null, soundOn = false;
+muteBtn.textContent = "♪ off";
+function beep(freq, when, len = .12, gain = .05) {
+  if (!soundOn || !AC) return;
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = "sine"; o.frequency.value = freq;
+  g.gain.setValueAtTime(gain, when);
+  g.gain.exponentialRampToValueAtTime(.0001, when + len);
+  o.connect(g).connect(AC.destination);
+  o.start(when); o.stop(when + len + .02);
+}
+const BEEPS = [ [8, 220], [28, 180], [36.2, 140], [40, 660], [52, 330] ];
+muteBtn.addEventListener("click", async () => {
+  if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+  if (AC.state === "suspended") await AC.resume();
+  soundOn = !soundOn;
+  muteBtn.textContent = soundOn ? "♪ on" : "♪ off";
+});
+
+/* pre-roll: render frame 0 so the poster looks composed */
+paint(0);
+
+/* render mode: deterministic frame capture for the CI pipeline.
+   window.__seek(t) is the single source of truth — every frame is paint(t). */
+const RENDER = new URLSearchParams(location.search).has("render");
+if (RENDER) {
+  document.body.classList.add("render");
+  window.__seek = (tt) => { t = tt; paint(tt); };
+  window.__READY = true;
+} else {
+  requestAnimationFrame((now) => { last = now; loop(now); });
+}
+
+</script>
+</body>
+</html>

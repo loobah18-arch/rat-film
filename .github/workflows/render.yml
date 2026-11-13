@@ -1,0 +1,53 @@
+name: render
+
+on:
+  workflow_dispatch:
+    inputs:
+      fps:
+        description: "Frames per second (24 = cinematic)"
+        default: "24"
+        required: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install playwright + chromium
+        run: |
+          npm install playwright@1.49.0
+          npx playwright install --with-deps chromium
+
+      - name: Install python audio deps
+        run: pip install edge-tts numpy
+
+      - name: Capture frames (headless chromium)
+        run: node render/render.js
+        env:
+          FPS: ${{ github.event.inputs.fps || '24' }}
+          DUR: "64"
+          W: "1920"
+          H: "1080"
+
+      - name: Narration + music + mux
+        run: python render/audio.py
+        env:
+          FPS: ${{ github.event.inputs.fps || '24' }}
+          DUR: "64"
+
+      - name: Upload MP4
+        uses: actions/upload-artifact@v4
+        with:
+          name: rat-film-mp4
+          path: rat.mp4
+          retention-days: 14
