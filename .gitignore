@@ -4,3 +4,4 @@ audio.wav
 rat.mp4
 node_modules/
 package-lock.json
+render/__pycache__/
